@@ -1,0 +1,12 @@
+numpy
+python-dotenv
+google-generativeai
+pandas
+faiss-cpu
+sentence-transformers
+pillow
+pytesseract
+googletrans==4.0.0-rc1
+opencv-python
+langdetect
+tk
