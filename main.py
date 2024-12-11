@@ -1,183 +1,138 @@
 import os
-import tkinter as tk
-from tkinter import filedialog, messagebox
-from tkinter import ttk
-from dotenv import load_dotenv
-import google.generativeai as palm
+import openai
 import pandas as pd
-import faiss
-from sentence_transformers import SentenceTransformer
-from PIL import Image
-import pytesseract
-from googletrans import Translator
-import cv2
-from langdetect import detect
-import numpy as np
+from dotenv import load_dotenv
+from langchain.chains import ConversationChain
+from langchain_openai import ChatOpenAI
+from sentence_transformers import SentenceTransformer, util
+import tkinter as tk
+from tkinter import scrolledtext
 
-# Configuración inicial
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-
+# Cargar la clave de la API de OpenAI desde el archivo .env
 load_dotenv()
-gemini_api_key = os.getenv("GEMINI_API_KEY")
-if not gemini_api_key:
-    raise ValueError("No se encontró la clave GEMINI_API_KEY en el archivo .env")
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
-palm.configure(api_key=gemini_api_key)
+# Configurar LangChain con ChatOpenAI
+langchain_llm = ChatOpenAI(
+    model="gpt-3.5-turbo",
+    temperature=0.7,
+    openai_api_key=openai.api_key
+)
 
-# Modelo de embeddings
+# Crear una instancia de ConversationChain para manejar la conversación
+conversation_chain = ConversationChain(llm=langchain_llm)
+
+# Crear embeddings para preguntas frecuentes
 model = SentenceTransformer('all-MiniLM-L6-v2')
 
-# Función para cargar datos del CSV
+# Función para cargar el archivo FAQ CSV
 def load_faq_data(file_path):
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"No se encontró el archivo: {file_path}")
     df = pd.read_csv(file_path)
     if "question" not in df.columns or "answer" not in df.columns:
         raise ValueError("El archivo CSV debe tener las columnas 'question' y 'answer'")
     return df
 
-faq_path = "faq.csv"
-if not os.path.exists(faq_path):
-    raise FileNotFoundError(f"No se encontró el archivo '{faq_path}'")
-faq_data = load_faq_data(faq_path)
-questions = faq_data["question"].tolist()
-answers = faq_data["answer"].tolist()
+# Crear embeddings de las preguntas en el CSV
+def create_faq_embeddings(df):
+    questions = df["question"].tolist()
+    embeddings = model.encode(questions, convert_to_tensor=True)
+    return embeddings
 
-# Crear índice FAISS
-embeddings = model.encode(questions)
-dimension = embeddings.shape[1]
-index = faiss.IndexFlatL2(dimension)
-index.add(embeddings)
+# Función para encontrar la pregunta más similar en el CSV
+def find_most_similar_question(question, faq_data, faq_embeddings):
+    question_embedding = model.encode([question])
+    similarities = util.pytorch_cos_sim(question_embedding, faq_embeddings)[0]
+    most_similar_idx = similarities.argmax().item()
+    return faq_data.iloc[most_similar_idx]
 
-# Funciones auxiliares
-def find_closest_question(user_question):
-    user_embedding = model.encode([user_question])
-    distances, indices = index.search(user_embedding, 1)
-    closest_idx = indices[0][0]
-    return questions[closest_idx], distances[0][0]
+# Función para manejar interacción usando LangChain con el FAQ
+def langchain_interact_with_faq(question, faq_data, faq_embeddings):
+    # Buscar la pregunta más similar en el FAQ
+    most_similar = find_most_similar_question(question, faq_data, faq_embeddings)
+    faq_answer = most_similar["answer"]
+    
+    # Hacer que LangChain genere una respuesta usando la respuesta del FAQ
+    prompt = f"Pregunta: {question}\nRespuesta del FAQ: {faq_answer}\nResponde de forma clara y amigable:"
+    response = conversation_chain.run(prompt)
+    return response
 
-def get_gemini_response(question, context):
-    prompt = (
-        f"Contexto:\n{context}\n\n"
-        f"Pregunta: {question}\n"
-        "Por favor responde de manera clara y concisa:"
-    )
-    model = palm.GenerativeModel("gemini-1.5-flash")
-    response = model.generate_content(prompt)
-    return response.text if response else "No se pudo generar una respuesta."
+# Función para manejar la interfaz gráfica
+def chat_interface():
+    # Cargar datos y embeddings
+    faq_data = load_faq_data('faq.csv')
+    faq_embeddings = create_faq_embeddings(faq_data)
 
-def process_image(image_path):
-    image = cv2.imread(image_path)
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    custom_config = r'--psm 6 -l eng+spa'
-    extracted_text = pytesseract.image_to_string(binary, config=custom_config)
-    try:
-        detected_language = detect(extracted_text)
-        if detected_language == "en":
-            translator = Translator()
-            translated_text = translator.translate(extracted_text, src="en", dest="es").text
-            return f"Texto extraído: {extracted_text}\nTraducción: {translated_text}"
-        elif detected_language == "es":
-            return f"Texto extraído: {extracted_text}"
-        else:
-            return f"Texto extraído (Idioma no identificado): {extracted_text}"
-    except Exception as e:
-        return f"Error al detectar o traducir el idioma: {e}"
+    # Crear ventana principal
+    window = tk.Tk()
+    window.title("Asistente de FAQ con LangChain")
+    window.geometry("800x700")
+    window.configure(bg="#edf2f7")
 
+    # Fondo degradado
+    def create_gradient(canvas, width, height):
+        for i in range(height):
+            color = f"#{int(255 - (i / height) * 50):02x}{int(245 - (i / height) * 50):02x}{255:02x}"
+            canvas.create_line(0, i, width, i, fill=color)
+    
+    canvas = tk.Canvas(window, width=800, height=700)
+    canvas.pack(fill="both", expand=True)
+    create_gradient(canvas, 800, 700)
 
-# Interfaz gráfica mejorada
-def handle_question():
-    user_question = question_entry.get()
-    if not user_question:
-        messagebox.showerror("Error", "Por favor, ingresa una pregunta.")
-        return
+    # Título
+    title = tk.Label(window, text="Asistente de FAQ con LangChain", font=("Helvetica", 24, "bold"), bg="#edf2f7", fg="#2d3748")
+    title.place(x=250, y=20)
 
-    closest_question, distance = find_closest_question(user_question)
-    context = f"Pregunta: {closest_question}\nRespuesta: {faq_data.iloc[questions.index(closest_question)]['answer']}"
-    response = get_gemini_response(user_question, context)
-    output_text.set(f"\n• Pregunta más cercana:\n{closest_question}\n\n• Respuesta:\n{response}")
+    # Subtítulo
+    subtitle = tk.Label(window, text="Escribe tu pregunta y obtén una respuesta.", font=("Helvetica", 14), bg="#edf2f7", fg="#4a5568")
+    subtitle.place(x=220, y=70)
 
-def handle_image():
-    image_path = filedialog.askopenfilename(filetypes=[("Imágenes", "*.jpg *.jpeg *.png *.bmp")])
-    if not image_path:
-        return
-    result = process_image(image_path)
-    output_text.delete("1.0", tk.END)  # Limpia el contenido anterior del cuadro de texto
-    output_text.insert(tk.END, f"\n• Resultado de la imagen procesada:\n{result}")  # Inserta el nuevo texto
+    # Cuadro de historial de chat
+    chat_frame = tk.Frame(window, bg="#edf2f7", bd=2, relief="groove")
+    chat_frame.place(x=50, y=110, width=700, height=450)
 
+    chat_history = scrolledtext.ScrolledText(chat_frame, wrap=tk.WORD, state='normal', bg="#ffffff", fg="#000", font=("Helvetica", 12), bd=0)
+    chat_history.config(state='normal')
+    chat_history.pack(pady=10, padx=10, fill="both", expand=True)
 
-def exit_app():
-    root.quit()
+    # Campo de entrada del usuario
+    user_input_frame = tk.Frame(window, bg="#edf2f7")
+    user_input_frame.place(x=50, y=580, width=700)
 
-# Crear ventana principal
-root = tk.Tk()
-root.title("Asistente de Aprendizaje de Inglés")
-root.geometry("900x650")
-root.configure(bg="#1e3d59")
+    user_input = tk.Entry(user_input_frame, font=("Helvetica", 14), width=50, bd=2, relief="groove")
+    user_input.grid(row=0, column=0, padx=(20, 10), pady=10)  # Añadido padx=(20, 10)
 
-# Estilo
-style = ttk.Style()
-style.theme_use("clam")
-style.configure("TLabel", font=("Times New Roman", 12), background="#1e3d59", foreground="#ffffff")
-style.configure("TButton", font=("Times New Roman", 10), padding=6, background="#4caf50", foreground="#ffffff")
-style.map("TButton", background=[("active", "#45a049")])
+    # Función para manejar el envío del mensaje
+    def send_message():
+        user_message = user_input.get().strip()  # Obtener texto del usuario
+        if not user_message:
+            return  # No hacer nada si el usuario no ingresa texto
 
-# Título
-title_label = ttk.Label(root, text="Bienvenido al Asistente de Inglés", font=("Times New Roman", 18, "bold"), background="#1e3d59", foreground="#ffffff")
-title_label.pack(pady=20)
+        # Mostrar mensaje del usuario en el cuadro de texto
+        chat_history.config(state='normal')
+        chat_history.insert(tk.END, f"Tú: {user_message}\n", "user")
 
-frame = tk.Frame(root, bg="#1e3d59")
-frame.pack(pady=20)
+        # Respuesta con LangChain usando el FAQ
+        langchain_response = langchain_interact_with_faq(user_message, faq_data, faq_embeddings)
+        chat_history.insert(tk.END, f"Asistente: {langchain_response}\n", "langchain")
 
-question_label = ttk.Label(frame, text="Escribe tu pregunta:", background="#1e3d59")
-question_label.grid(row=0, column=0, padx=10, pady=10)
+        # Limpiar el campo de entrada del usuario
+        user_input.delete(0, tk.END)
 
-question_entry = ttk.Entry(frame, width=60)
-question_entry.grid(row=0, column=1, padx=10, pady=10)
+        # Desplazarse al final del historial
+        chat_history.see(tk.END)
+        chat_history.config(state='disabled')
 
-ask_button = ttk.Button(frame, text="Preguntar", command=handle_question)
-ask_button.grid(row=0, column=2, padx=10, pady=10)
+    # Botón de enviar
+    send_button = tk.Button(user_input_frame, text="Enviar", command=send_message, font=("Helvetica", 14), bg="#4CAF50", fg="#fff", relief="flat", activebackground="#45a049")
+    send_button.grid(row=0, column=1, padx=(10, 20))  # Añadido padx=(10, 20)
 
-image_button = ttk.Button(root, text="Cargar Imagen", command=handle_image)
-image_button.pack(pady=20)
+    # Estilizar mensajes
+    chat_history.tag_config("user", foreground="#3182CE", font=("Helvetica", 12, "italic"))
+    chat_history.tag_config("langchain", foreground="#E53E3E", font=("Helvetica", 12, "italic"))
 
-output_frame = tk.Frame(root, bg="#ffffff", bd=2, relief="solid")
-output_frame.pack(pady=20, padx=20, fill="both", expand=True)
+    window.mainloop()
 
-scrollbar = tk.Scrollbar(output_frame, orient="vertical")
-scrollbar.pack(side="right", fill="y")
-
-output_text = tk.Text(output_frame, wrap="word", font=("Times New Roman", 12), bg="#f7f7f7", fg="#333333", yscrollcommand=scrollbar.set)
-output_text.pack(fill="both", expand=True)
-scrollbar.config(command=output_text.yview)
-
-# Footer
-footer_label = ttk.Label(root, text="Desarrollado por nosotros", font=("Times New Roman", 10), background="#1e3d59", foreground="#ffffff")
-footer_label.pack(pady=10)
-
-# Actualización de contenido
-def handle_question():
-    user_question = question_entry.get()
-    if not user_question:
-        messagebox.showerror("Error", "Por favor, ingresa una pregunta.")
-        return
-
-    closest_question, distance = find_closest_question(user_question)
-    context = f"Pregunta: {closest_question}\nRespuesta: {faq_data.iloc[questions.index(closest_question)]['answer']}"
-    response = get_gemini_response(user_question, context)
-    output_text.delete("1.0", tk.END)  # Limpia el contenido anterior
-    output_text.insert(tk.END, f"• Pregunta más cercana:\n{closest_question}\n\n• Respuesta:\n{response}")
-
-def handle_image():
-    image_path = filedialog.askopenfilename(filetypes=[("Imágenes", "*.jpg *.jpeg *.png *.bmp")])
-    if not image_path:
-        return
-    result = process_image(image_path)
-    output_text.delete("1.0", tk.END)  # Limpia el contenido anterior del cuadro de texto
-    output_text.insert(tk.END, f"\n• Resultado de la imagen procesada:\n{result}")  # Inserta el nuevo texto
-
-
-def exit_app():
-    root.quit()
-
-# Iniciar aplicación
-root.mainloop()
+if __name__ == "__main__":
+    chat_interface()
